@@ -1,5 +1,4 @@
 from django.db import models
-from django.utils import timezone
 
 
 class Event(models.Model):
@@ -9,27 +8,7 @@ class Event(models.Model):
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
-        return self.title
-
-    def get_program(self):
-        """Формирует программу мероприятия из слотов времени."""
-        time_slots = self.time_slots.select_related('speaker').all()
-        program = []
-        for slot in time_slots:
-            program.append(
-                f"{slot.start_time.strftime('%H:%M')} - {slot.end_time.strftime('%H:%M')}: "
-                f"{slot.title} ({slot.speaker.name})"
-            )
-        return "\n".join(program) if program else "Программа пока не доступна."
-
-    def get_current_speaker(self):
-        if not self.is_active:
-            return None
-        now = timezone.now()
-        return self.time_slots.filter(
-            start_time__lte=now,
-            end_time__gte=now
-        ).select_related('speaker').first()
+        return f'{self.title}-{self.date}'
 
 
 class Speaker(models.Model):
@@ -91,7 +70,8 @@ class Participant(models.Model):
         null=True,
         help_text="Короткая информация о роде деятельности"
     )
-    is_speaker = models.BooleanField(default=False)
+    is_speaker = models.BooleanField(default=False, verbose_name='Докладчик')
+    is_event_manager = models.BooleanField(default=False, verbose_name='Управляющий мероприятием')
 
     def __str__(self):
         return f"{self.name} (@{self.telegram_username})"
