@@ -38,16 +38,31 @@ class SpeakerAdmin(admin.ModelAdmin):
 
 @admin.register(Participant)
 class ParticipantAdmin(admin.ModelAdmin):
-    list_display = ('name', 'telegram_username', 'is_speaker')
-    list_filter = ('is_speaker',)
+    list_display = ('name', 'telegram_username', 'is_speaker', 'is_event_manager')
+    list_filter = ('is_speaker', 'is_event_manager')
     search_fields = ('name', 'telegram_username')
 
 
 @admin.register(Question)
 class QuestionAdmin(admin.ModelAdmin):
-    list_display = ('speaker', 'participant', 'timestamp', 'is_answered')
-    list_filter = ('is_answered', 'speaker')
+    list_display = ('speaker', 'participant', 'short_text', 'timestamp', 'is_answered')
+    list_filter = ('is_answered', 'speaker', 'event')
     search_fields = ('text', 'speaker__name', 'participant__name')
+    list_editable = ('is_answered',)  # Позволяет отмечать "ответил" прямо в списке
+    readonly_fields = ('timestamp',)
+    fieldsets = (
+        (None, {
+            'fields': ('event', 'speaker', 'participant', 'text', 'is_answered')
+        }),
+        ('Метаданные', {
+            'fields': ('timestamp',),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def short_text(self, obj):
+        return f"{obj.text[:50]}..." if len(obj.text) > 50 else obj.text
+    short_text.short_description = 'Текст вопроса'
 
 
 @admin.register(Donation)
