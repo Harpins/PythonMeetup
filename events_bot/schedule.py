@@ -1,14 +1,21 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.error import TelegramError
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
+from events_bot.views import get_program, serialize_current_events, get_staff_ids, send_question
 from environs import Env
-from events_bot.views import get_program, serialize_current_events, get_manager_ids
 
 
-def get_main_keyboard(is_manager=False):
+def get_main_keyboard(is_manager=False, is_speaker=False):
     keyboard = [[InlineKeyboardButton("📅 Программа", callback_data='schedule'), InlineKeyboardButton(
         "❓ Задать вопрос", callback_data='ask_speaker')]]
     if is_manager:
-        keyboard.append([InlineKeyboardButton("Заглушка", callback_data='manager')])  # Добавить кнопки для админа
+        # Добавить кнопки для админа
+        keyboard.append([InlineKeyboardButton(
+            "Заглушка", callback_data='manager')])
+    if is_speaker:
+        # Добавить кнопки для спикера
+        keyboard.append([InlineKeyboardButton(
+            "Заглушка", callback_data='speaker')])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -23,9 +30,24 @@ def get_ask_speaker_keyboard(speakers):
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_confirm_question_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("Подтвердить", callback_data='confirm_question'),
+         InlineKeyboardButton("Отмена", callback_data='cancel_question')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def start(update: Update, context):
-    manager_ids = get_manager_ids()
-    is_manager = str(update.message.from_user.id) in manager_ids
+    staff_ids = get_staff_ids()
+    manager_ids = staff_ids.get('manager_ids', [])
+    speaker_ids = staff_ids.get('speaker_ids', [])
+    is_manager = update.message.from_user.id in manager_ids
+    is_speaker = update.message.from_user.id in speaker_ids
+    context.user_data.update({
+        'is_manager': is_manager,
+        'is_speaker': is_speaker,
+    })
     update.message.reply_text(
         "Привет! Я бот PythonMeetup. Выбери действие:",
         reply_markup=get_main_keyboard(is_manager)
@@ -58,12 +80,123 @@ def ask_speaker(update: Update, context):
     response = "Активные доклады:\n"
     for event in current_events:
         response += f"{event}\n"
-    response += "Выберите докладчика для вопросов:\n"     
+    response += "Выберите докладчика для вопросов:\n"
     current_speakers = raw_info.get("speakers")
     query.message.reply_text(
-            response, reply_markup=get_ask_speaker_keyboard(current_speakers))
-    return
-    
+        response, reply_markup=get_ask_speaker_keyboard(current_speakers))
+    context.user_data['state'] = 'selecting_speaker'
+
+
+def process_speaker_selection(update: Update, context):
+    query = update.callback_query
+    query.answer()
+
+    if query.data == 'back':
+        query.edit_message_text(
+            "Выберите действие:",
+            reply_markup=get_main_keyboard()
+        )
+        context.user_data.clear()
+        return
+
+    if query.data.startswith('ask_'):
+        telegram_username = query.data.split('_', 1)[1]
+
+        context.user_data.update({
+            'state': 'awaiting_question',
+            'telegram_username': telegram_username,
+        })
+
+        query.edit_message_text(
+            "✍️ Введите ваш вопрос:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "❌ Отмена", callback_data='cancel_question')]
+            ])
+        )
+    else:
+        query.edit_message_text(
+            "Выберите действие:",
+            reply_markup=get_main_keyboard()
+        )
+        context.user_data.clear()
+
+
+def process_question(update: Update, context):
+    if context.user_data.get('state') != 'awaiting_question':
+        print(context.user_data.get('state'))
+        return
+    speaker_username = context.user_data.get('telegram_username')
+    participant_id = update.message.from_user.id
+    participant_name = update.message.from_user.first_name
+    text = update.message.text
+    try:
+        context.user_data.update({
+            'state': 'confirming_question',
+            'question': {
+                'speaker_username': speaker_username,
+                'participant_id': participant_id,
+                'participant_name': participant_name,
+                'text': text
+            }
+        })
+        keyboard = get_confirm_question_keyboard()
+        if not keyboard:
+            update.message.reply_text(
+                "Ошибка при создании меню. Попробуйте позже.")
+            return
+        update.message.reply_text(
+            f"Подтвердите ваш вопрос:\n\n{text}\n\nК спикеру: {speaker_username}",
+            reply_markup=keyboard
+        )
+
+    except Exception as err:
+        update.message.reply_text(
+            f"Произошла ошибка {err}, попробуйте задать вопрос позже", reply_markup=get_main_keyboard())
+        context.user_data['state'] = None
+        context.user_data['telegram_username'] = None
+
+
+
+def confirm_question(update: Update, context):
+    query = update.callback_query
+    query.answer()
+
+    if context.user_data.get('state') != 'confirming_question':
+        query.message.reply_text("Выберите действие:",
+                                 reply_markup=get_main_keyboard())
+        context.user_data.clear()
+        return
+
+    if query.data == 'confirm_question':
+        question_data = context.user_data.get('question')
+        if not question_data:
+            query.message.reply_text(
+                "Ошибка: данные вопроса отсутствуют.", reply_markup=get_main_keyboard())
+            return
+        try:
+            send_question(
+                speaker_username=question_data.get('speaker_username'),
+                participant_id=question_data.get('participant_id'),
+                participant_name=question_data.get('participant_name'),
+                text=question_data.get('text')
+            )
+            query.message.reply_text(
+                "Вопрос успешно отправлен", reply_markup=get_main_keyboard())
+        except Exception as err:
+            query.message.reply_text(
+                f"Произошла ошибка {err}, попробуйте задать вопрос позже", reply_markup=get_main_keyboard())
+            raise err
+    elif query.data == 'cancel_question':
+        query.message.reply_text(
+            "Вопрос отменен.", reply_markup=get_main_keyboard())
+    else:
+        query.message.reply_text(
+            "Что-то пошло не так", reply_markup=get_main_keyboard())
+
+    context.user_data.clear()
+
+
 def main():
     env = Env()
     env.read_env()
@@ -71,10 +204,16 @@ def main():
     updater = Updater(tg_bot_token, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CallbackQueryHandler(schedule, pattern="schedule"))
-    dp.add_handler(CallbackQueryHandler(ask_speaker, pattern="ask_speaker"))
+    dp.add_handler(CallbackQueryHandler(schedule, pattern='schedule'))
+    dp.add_handler(CallbackQueryHandler(ask_speaker, pattern='ask_speaker'))
+    dp.add_handler(CallbackQueryHandler(
+        process_speaker_selection, pattern='(ask_@[\w]+|back)'))
+    dp.add_handler(MessageHandler(Filters.all, process_question))
+    dp.add_handler(CallbackQueryHandler(confirm_question,
+                   pattern='(confirm_question|cancel_question)'))
     updater.start_polling()
     updater.idle()
+
 
 if __name__ == '__main__':
     main()
