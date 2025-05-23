@@ -14,7 +14,8 @@ class Event(models.Model):
 class Speaker(models.Model):
     events = models.ManyToManyField(
         Event,
-        related_name='speakers'
+        related_name='speakers',
+        blank=True, #Без этого не дает заполнить админку        
     )
     name = models.CharField(max_length=100)
     telegram_username = models.CharField(
