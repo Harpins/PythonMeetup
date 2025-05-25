@@ -34,7 +34,11 @@ from events_bot.views import send_question
     MAILING,
     CONFIRMING_MAILING,
     UNSUBSCRIBING,
-) = range(10)
+    SELECTING_EVENT_PARTICIPANT,
+    CONFIRMING_PARTICIPANT_REGISTRATION,
+    SHOW_MY_EVENTS,
+    CONFIRMING_UNREGISTER
+) = range(14)
 
 # Инициализация ЮKassa
 Configuration.account_id = settings.YOOKASSA_SHOP_ID
@@ -46,7 +50,9 @@ def get_main_keyboard(participant):
     keyboard = [
         ["📅 Программа", "🎁 Поддержать"],
         ["🙋Пообщаться", "📋Задать вопрос спикеру"],
-        ["Кто выступает сейчас?"]
+        ["Кто выступает сейчас?"],
+        ["📌 Зарегистрироваться на мероприятие"],
+        ["📋 Мои мероприятия"]
     ]
     if not participant.is_subscribed:
         keyboard.append(["Подписаться на рассылку"])
@@ -758,7 +764,8 @@ def mailing_confirm(update, context):
         try:
             participant = Participant.objects.get(telegram_id=user.id)
             mailing_text = context.user_data['mailing_text']
-            subscribed_participants = Participant.objects.filter(is_subscribed=True)
+            subscribed_participants = Participant.objects.filter(
+                is_subscribed=True)
 
             if not subscribed_participants.exists():
                 query.edit_message_text(
@@ -783,7 +790,8 @@ def mailing_confirm(update, context):
                     )
                     sent_count += 1
                 except Exception as e:
-                    print(f"Failed to send message to {participant.telegram_id}: {str(e)}")
+                    print(
+                        f"Failed to send message to {participant.telegram_id}: {str(e)}")
 
             query.edit_message_text(
                 "✅ Рассылка отправлена",
@@ -950,6 +958,322 @@ def unsubscribe_confirm(update, context):
     return ConversationHandler.END
 
 
+def register_participant_start(update, context):
+    """Начало процесса регистрации участника"""
+    user = update.effective_user
+    try:
+        participant = Participant.objects.get(telegram_id=user.id)
+    except Participant.DoesNotExist:
+        update.message.reply_text(
+            "❌ Пожалуйста, начните с команды /start",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+    events = Event.objects.filter(date__gte=timezone.now()).order_by('date')
+    if not events.exists():
+        update.message.reply_text(
+            "📭 Сейчас нет запланированных мероприятий",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(participant)
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "📌 Выберите мероприятие для регистрации:",
+        reply_markup=get_events_keyboard()
+    )
+    return SELECTING_EVENT_PARTICIPANT
+
+
+def register_participant_select_event(update, context):
+    """Обработка выбора мероприятия для регистрации участника"""
+    query = update.callback_query
+    query.answer()
+
+    if query.data == 'cancel':
+        try:
+            participant = Participant.objects.get(
+                telegram_id=query.from_user.id)
+            query.edit_message_text(
+                "❌ Регистрация отменена",
+                parse_mode='HTML'
+            )
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="❌ Действие отменено",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+        except Participant.DoesNotExist:
+            query.edit_message_text(
+                "❌ Пожалуйста, начните с команды /start",
+                parse_mode='HTML'
+            )
+        return ConversationHandler.END
+
+    event_id = int(query.data.split('_')[1])
+    try:
+        event = Event.objects.get(id=event_id)
+        context.user_data['participant_event'] = event
+        participant = Participant.objects.get(telegram_id=query.from_user.id)
+
+        if event in participant.registered_events.all():
+            query.edit_message_text(
+                f"✅ Вы уже зарегистрированы на:\n"
+                f"<b>{event.title}</b>\n"
+                f"Дата: {event.date.strftime('%d.%m.%Y')}",
+                parse_mode='HTML'
+            )
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="Выберите действие:",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+            return ConversationHandler.END
+
+        query.edit_message_text(
+            f"Подтвердите регистрацию как участника на:\n"
+            f"<b>{event.title}</b>\n"
+            f"Дата: {event.date.strftime('%d.%m.%Y')}\n\n"
+            f"Ваше имя: {query.from_user.full_name}\n"
+            f"Username: @{query.from_user.username or 'не указан'}",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ Подтвердить", callback_data='confirm')],
+                [InlineKeyboardButton("❌ Отмена", callback_data='cancel')]
+            ])
+        )
+        return CONFIRMING_PARTICIPANT_REGISTRATION
+    except Event.DoesNotExist:
+        query.edit_message_text("❌ Мероприятие не найдено")
+        return ConversationHandler.END
+
+
+def register_participant_confirm(update, context):
+    """Завершение регистрации участника"""
+    query = update.callback_query
+    query.answer()
+    user = query.from_user
+    chat_id = query.message.chat_id
+
+    if query.data == 'confirm':
+        try:
+            event = context.user_data['participant_event']
+            participant, created = Participant.objects.update_or_create(
+                telegram_id=user.id,
+                defaults={
+                    'name': user.full_name,
+                    'telegram_username': user.username
+                }
+            )
+            participant.registered_events.add(event)
+            query.edit_message_text(
+                f"✅ Вы успешно зарегистрированы как участник на мероприятие:\n"
+                f"<b>{event.title}</b>\n"
+                f"Дата: {event.date.strftime('%d.%m.%Y')}",
+                parse_mode='HTML'
+            )
+            context.bot.send_message(
+                chat_id=chat_id,
+                text="✅ Регистрация завершена! Выберите действие:",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+        except Exception as e:
+            query.edit_message_text(f"❌ Ошибка регистрации: {str(e)}")
+    else:
+        try:
+            participant = Participant.objects.get(telegram_id=user.id)
+            query.edit_message_text("❌ Регистрация отменена")
+            context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Действие отменено",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+        except Participant.DoesNotExist:
+            query.edit_message_text("❌ Пожалуйста, начните с команды /start")
+
+    return ConversationHandler.END
+
+def get_my_events_keyboard(participant):
+    """Клавиатура с мероприятиями, на которые зарегистрирован участник"""
+    events = participant.registered_events.all().order_by('date')
+    keyboard = [
+        [InlineKeyboardButton(
+            event.get_full_name(),
+            callback_data=f"my_event_{event.id}"
+        )]
+        for event in events
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data='cancel')])
+    return InlineKeyboardMarkup(keyboard)
+
+def my_events_start(update, context):
+    """Начало процесса просмотра зарегистрированных мероприятий"""
+    user = update.effective_user
+    try:
+        participant = Participant.objects.get(telegram_id=user.id)
+    except Participant.DoesNotExist:
+        update.message.reply_text(
+            "❌ Пожалуйста, начните с команды /start",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+    events = participant.registered_events.all()
+    if not events.exists():
+        update.message.reply_text(
+            "📭 Вы не зарегистрированы ни на одно мероприятие",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard(participant)
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "📋 <b>Ваши зарегистрированные мероприятия:</b>\n\n"
+        "Выберите мероприятие, чтобы отписаться:",
+        parse_mode='HTML',
+        reply_markup=get_my_events_keyboard(participant)
+    )
+    return SHOW_MY_EVENTS
+
+def my_events_select_event(update, context):
+    """Обработка выбора мероприятия для отписки"""
+    query = update.callback_query
+    query.answer()
+
+    if query.data == 'cancel':
+        try:
+            participant = Participant.objects.get(telegram_id=query.from_user.id)
+            query.edit_message_text(
+                "❌ Действие отменено",
+                parse_mode='HTML'
+            )
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="❌ Действие отменено",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+        except Participant.DoesNotExist:
+            query.edit_message_text(
+                "❌ Пожалуйста, начните с команды /start",
+                parse_mode='HTML'
+            )
+        return ConversationHandler.END
+
+    event_id = int(query.data.split('_')[2])
+    try:
+        event = Event.objects.get(id=event_id)
+        context.user_data['unregister_event'] = event
+        participant = Participant.objects.get(telegram_id=query.from_user.id)
+
+        query.edit_message_text(
+            f"Подтвердите отписку от мероприятия:\n"
+            f"<b>{event.title}</b>\n"
+            f"Дата: {event.date.strftime('%d.%m.%Y')}",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Подтвердить", callback_data='confirm')],
+                [InlineKeyboardButton("❌ Отмена", callback_data='cancel')]
+            ])
+        )
+        return CONFIRMING_UNREGISTER
+    except Event.DoesNotExist:
+        query.edit_message_text("❌ Мероприятие не найдено")
+        return ConversationHandler.END
+
+def my_events_confirm_unregister(update, context):
+    """Подтверждение отписки от мероприятия"""
+    query = update.callback_query
+    query.answer()
+    user = query.from_user
+    chat_id = query.message.chat_id
+
+    if query.data == 'confirm':
+        try:
+            event = context.user_data['unregister_event']
+            participant = Participant.objects.get(telegram_id=user.id)
+            if event in participant.registered_events.all():
+                participant.registered_events.remove(event)
+                query.edit_message_text(
+                    f"✅ Вы успешно отписались от мероприятия:\n"
+                    f"<b>{event.title}</b>\n"
+                    f"Дата: {event.date.strftime('%d.%m.%Y')}",
+                    parse_mode='HTML'
+                )
+            else:
+                query.edit_message_text(
+                    f"❌ Вы не зарегистрированы на:\n"
+                    f"<b>{event.title}</b>",
+                    parse_mode='HTML'
+                )
+            context.bot.send_message(
+                chat_id=chat_id,
+                text="Выберите действие:",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+        except Exception as e:
+            query.edit_message_text(f"❌ Ошибка отписки: {str(e)}")
+    else:
+        try:
+            participant = Participant.objects.get(telegram_id=user.id)
+            query.edit_message_text("❌ Отписка отменена")
+            context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Действие отменено",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard(participant)
+            )
+        except Participant.DoesNotExist:
+            query.edit_message_text("❌ Пожалуйста, начните с команды /start")
+
+    return ConversationHandler.END
+
+
+def send_new_event_notification(bot, event):
+    """Отправление подписчикам уведомлений о новых событиях"""
+
+    subscribed_participants = Participant.objects.filter(is_subscribed=True)
+    
+    if not subscribed_participants.exists():
+        print("No subscribed participants to notify about new event.")
+        return 0
+
+    sent_count = 0
+    try:
+        notification_text = (
+            f"🎉 <b>Новое мероприятие анонсировано!</b>\n\n"
+            f"📅 <b>{event.title}</b>\n"
+            f"🕒 Дата: {event.date.strftime('%d.%m.%Y')}\n"
+            f"📜 Программа:\n{event.get_program()}\n\n"
+            f"<i>Зарегистрируйтесь или задайте вопросы спикерам через бота!</i>"
+        )
+    except Exception as e:
+        print(f"Error generating notification text: {str(e)}")
+        return 0
+
+    for participant in subscribed_participants:
+        try:
+            bot.send_message(
+                chat_id=participant.telegram_id,
+                text=notification_text,
+                parse_mode='HTML'
+            )
+            sent_count += 1
+        except Exception as e:
+            print(f"Не удалось отправить уведомление участнику с ID {participant.telegram_id}: {str(e)}")
+
+    return sent_count
+
+
 def setup_dispatcher(dp):
     # Обработчики команд
     dp.add_handler(CommandHandler("start", start))
@@ -975,6 +1299,46 @@ def setup_dispatcher(dp):
     )
 
     dp.add_handler(registration_conv)
+
+    # Обработчики регистрации участников
+    participant_registration_conv = ConversationHandler(
+        entry_points=[MessageHandler(Filters.regex(
+            '^📌 Зарегистрироваться на мероприятие$'), register_participant_start)],
+        states={
+            SELECTING_EVENT_PARTICIPANT: [
+                CallbackQueryHandler(
+                    register_participant_select_event, pattern='^event_'),
+                CallbackQueryHandler(
+                    register_participant_confirm, pattern='^cancel$'),
+            ],
+            CONFIRMING_PARTICIPANT_REGISTRATION: [
+                CallbackQueryHandler(register_participant_confirm),
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    dp.add_handler(participant_registration_conv)
+    
+    # Обработчики мероприятий юзера
+    my_events_conv = ConversationHandler(
+        entry_points=[MessageHandler(Filters.regex(
+            '^📋 Мои мероприятия$'), my_events_start)],
+        states={
+            SHOW_MY_EVENTS: [
+                CallbackQueryHandler(
+                    my_events_select_event, pattern='^my_event_'),
+                CallbackQueryHandler(
+                    my_events_confirm_unregister, pattern='^cancel$'),
+            ],
+            CONFIRMING_UNREGISTER: [
+                CallbackQueryHandler(my_events_confirm_unregister),
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    dp.add_handler(my_events_conv)
 
     setup_speaker_handlers(dp)  # обработчики для спикеров
 

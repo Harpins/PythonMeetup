@@ -1,13 +1,9 @@
 from django.conf import settings
-from django.utils import timezone
-from django.db import transaction, models
+from django.db import transaction
 from .models import Speaker, Participant, Question
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from environs import Env
 
 
-env = Env()
-env.read_env()
 BOT_TOKEN = settings.TG_BOT_TOKEN
 
 
