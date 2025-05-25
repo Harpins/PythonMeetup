@@ -107,6 +107,7 @@ class Participant(models.Model):
     )
     is_speaker = models.BooleanField(default=False, verbose_name='Докладчик')
     is_event_manager = models.BooleanField(default=False, verbose_name='Управляющий мероприятием')
+    is_subscribed = models.BooleanField(default=False, verbose_name='Подписан')
 
     def __str__(self):
         return f"{self.name} (@{self.telegram_username})"
