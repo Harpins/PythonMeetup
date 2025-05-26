@@ -107,6 +107,14 @@ class Participant(models.Model):
     )
     is_speaker = models.BooleanField(default=False, verbose_name='Докладчик')
     is_event_manager = models.BooleanField(default=False, verbose_name='Управляющий мероприятием')
+    is_first_in_networking = models.BooleanField(
+        default=False,
+        verbose_name='Первый пользователь в знакомствах'
+    )
+    notified_about_newcommers = models.BooleanField(
+        default=False,
+        verbose_name='Уведомлён о новых анкетах'
+    )
 
     @property
     def has_profile(self):
